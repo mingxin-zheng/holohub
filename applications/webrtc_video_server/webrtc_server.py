@@ -29,6 +29,69 @@ from operators.webrtc_server.webrtc_server_op import WebRTCServerOp
 ROOT = os.path.dirname(__file__)
 
 
+from PIL import Image
+import numpy as np
+from minio import Minio
+from minio.error import S3Error
+import io
+import cupy as cp
+
+class MinIOUploadOp(holoscan.core.Operator):
+    def __init__(self, fragment, name="minio_upload", bucket_name="holoscan"):
+        super().__init__(fragment, name=name)
+        self.bucket_name = bucket_name
+        self.minio_client = Minio(
+            "localhost:9000",
+            access_key="minioadmin",
+            secret_key="minioadmin",
+            secure=False,
+        )
+
+        # Ensure bucket exists
+        if not self.minio_client.bucket_exists(self.bucket_name):
+            self.minio_client.make_bucket(self.bucket_name)
+
+    def setup(self, spec: holoscan.core.OperatorSpec):
+        spec.input("input")
+        spec.output("input")
+
+    def compute(self, op_input, op_output, context):
+        # Receive the frame from the pipeline
+        message = op_input.receive("input")
+
+        if isinstance(message, np.ndarray):
+            frame = message
+        elif isinstance(message, dict):
+            tensor = next(iter(message.values()))
+            # convert tensor to numpy
+            frame = cp.asnumpy(cp.asarray(tensor))
+        else:
+            raise Exception("Unexpected type ", type(message))
+        
+        # Convert tensor to numpy array (assuming RGB888 format)
+        image = Image.fromarray(frame.astype(np.uint8))
+
+        # Save image to a byte stream
+        image_bytes = io.BytesIO()
+        image.save(image_bytes, format="JPEG")
+        image_bytes.seek(0)
+
+        try:
+            # Upload to MinIO
+            self.minio_client.put_object(
+                self.bucket_name,
+                "updated_image_test.jpg",
+                image_bytes,
+                image_bytes.getbuffer().nbytes,
+                content_type="image/jpeg"
+            )
+        except S3Error as e:
+            print(f"Error uploading image to MinIO: {e}")
+
+        # Pass the frame to the next operator
+        op_output.emit(message, "input")
+
+
 def parse_ice_strings(ice_server_strings):
     """
     Convert a list of ICE server strings into a list of dictionaries of the iceServers format.
@@ -148,10 +211,11 @@ class WebRTCServerApp(holoscan.core.Application):
         video_replayer = holoscan.operators.VideoStreamReplayerOp(
             self,
             name="video_replayer",
-            directory=os.path.join(data, "racerx"),
-            basename="racerx",
+            directory=os.path.join(data, "endoscopy"),
+            basename="surgical_video",
             realtime=False,
             repeat=True,
+            frame_rate=1,
         )
         # convert VideoFrame to Tensor, there is currently no support for VideoFrame in Holoscan Python
         video_source = holoscan.operators.FormatConverterOp(
@@ -171,9 +235,12 @@ class WebRTCServerApp(holoscan.core.Application):
         )
         self.add_flow(video_replayer, video_source)
 
+        minio_upload_op = MinIOUploadOp(self, name="minio_upload")
+        self.add_flow(video_source, minio_upload_op)
+
         # create the WebRTC server operator
         webrtc_server = WebRTCServerOp(self, name="webrtc_server")
-        self.add_flow(video_source, webrtc_server)
+        self.add_flow(minio_upload_op, webrtc_server)
 
         # start the web server in the background, this will call the WebRTC server operator
         # 'offer' method when a connection is established
@@ -186,6 +253,10 @@ class WebRTCServerApp(holoscan.core.Application):
             self._cmdline_args.ice_server,
         )
         self._web_app_thread.start()
+        # Create another thread to run the minio_upload_op
+        self._minio_upload_thread = Thread(target=minio_upload_op.start)
+        self._minio_upload_thread.start()
+
 
 
 if __name__ == "__main__":

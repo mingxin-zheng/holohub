@@ -18,6 +18,7 @@ aggregate_metadata.json
 # Dev
 .venv/
 ngc-cli/
+.ngc/
 .bash_history
 .python_history
 .wget-hsts
