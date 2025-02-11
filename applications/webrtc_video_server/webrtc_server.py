@@ -50,6 +50,22 @@ class MinIOUploadOp(holoscan.core.Operator):
         # Ensure bucket exists
         if not self.minio_client.bucket_exists(self.bucket_name):
             self.minio_client.make_bucket(self.bucket_name)
+            # Define public bucket policy (properly formatted JSON)
+            bucket_policy = {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {"AWS": "*"},
+                        "Action": ["s3:GetObject"],
+                        "Resource": [f"arn:aws:s3:::{self.bucket_name}/*"]
+                    }
+                ]
+            }
+
+            # Convert dictionary to a JSON string
+            bucket_policy_json = json.dumps(bucket_policy)
+            self.minio_client.set_bucket_policy(self.bucket_name, bucket_policy_json)
 
     def setup(self, spec: holoscan.core.OperatorSpec):
         spec.input("input")
@@ -80,7 +96,7 @@ class MinIOUploadOp(holoscan.core.Operator):
             # Upload to MinIO
             self.minio_client.put_object(
                 self.bucket_name,
-                "updated_image_test.jpg",
+                "live.jpg",
                 image_bytes,
                 image_bytes.getbuffer().nbytes,
                 content_type="image/jpeg"
